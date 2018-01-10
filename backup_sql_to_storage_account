@@ -1,24 +1,8 @@
-################
-## Background ##
-################
-
-# This script takes a backup from SQL PaaS and stores it in storage for download
-
-##################
-## Requirements ##
-##################
-
-# 1.1 PaaS SQL server + db's
-# 2.1 storage account + container
-# 3.1 azure automation account (need to make sure "RunAsAccountConnection" is avaiable when creating automation account)
-# 3.2 make sure modules under automation account are updated
-
-
 Get-Date
 
 $ErrorActionPreference = "Stop"
 
-# check connection to account
+# need to have "RunAsConnection privileges when creating automation account"
 $connectionName = "AzureRunAsConnection"
 try
 {
@@ -47,59 +31,58 @@ catch {
 	}
 }
 
+# validate connection
 Write-Output "AzureRunAsConnection: Done."
 
-
-# populate storage details
-$StorageAccountName = '873063twesqlbackups'
+# Populate storage details
+$StorageAccountName = 'sqlbackupsaccount'
 $ContainerName = 'bacpacs'
 $StorageKeytype = 'StorageAccessKey'
 $StorageAccount = Get-AzureRmStorageAccount | ? StorageAccountName -EQ $StorageAccountName
+
+# output storage account details
 $StorageAccount
 
-
-# get the storage account keys
+# get storage account access key
+Write-Output "Attempting to get Storage Account Key"
 $StorageAccountKeys = Get-AzureRmStorageAccountKey -ResourceGroupName $StorageAccount.ResourceGroupName -Name $StorageAccount.StorageAccountName
+Write-Output "Successfully Obtained Storage Key"
 
-# now we only need the first one [0].value
+# store storage access key
 $StorageAccountKey = $StorageAccountKeys[0].Value 
-# Write-Output $StorageAccountKey
-
 $StorageContext = New-AzureStorageContext -StorageAccountName $storageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey 
 
+# getting storage details section of script complete
 Write-Output "Storage: Done."
 
 
-# loop through the databases and obtain backup.
-# the variables blade contains the db details in the following format:
-#
+# get db details that are stored in variables section.  This is in the from of JSON
 
 #[
 #    {
-#        "ResourceGroupName":  "Default-SQL-SoutheastAsia",
-#        "ServerName":  "SQL_Server_Name",
-#        "DatabaseName":  "Database_Name",
-#        "Password":  "db_password",
-#        "UserName":  "db_user"
+#        "ResourceGroupName":  "rg-name",
+#        "ServerName":  "sql-server-name",
+#        "DatabaseName":  "db-name",
+#        "Password":  "db-password",
+#        "UserName":  "db-user"
 #    }
-#]
+#]    
 
 $DatabaseConfigurations = Get-AutomationVariable -Name 'AzureSqlDatabaseExportConfiguration' | ConvertFrom-Json
 
-# See what sql databases are configured for backups
-# Get-AutomationVariable -Name 'AzureSqlDatabaseExportConfiguration'
-# Exit
+# loop through and export to storage
 
 ForEach ($DatabaseConfiguration in $DatabaseConfigurations) {
-    $DatabaseConfiguration.DatabaseName
+    
+    $DatabaseConfiguration.DatabaseName  
 
     $TheBlobName = (Get-Date -Format 'yyyy-MM-dd-') + $DatabaseConfiguration.DatabaseName + '.bacpac'
-    $TheBlob = Get-AzureStorageBlob -Context $StorageContext -Container $ContainerName | ? Name -eq $TheBlobName 
+    $TheBlob = Get-AzureStorageBlob -Context $StorageContext -Container $ContainerName | ? Name -eq $TheBlobName
     $BacpacUri = "https://$StorageAccountName.blob.core.windows.net/$ContainerName/$TheBlobName"
 
     If (-Not $TheBlob) {
         $DatabaseConfigurationPassword = $DatabaseConfiguration.Password | ConvertTo-SecureString -AsPlainText -Force
-        $exportRequest = New-AzureRmSqlDatabaseExport `
+         $exportRequest = New-AzureRmSqlDatabaseExport `
 	        -ResourceGroupName $DatabaseConfiguration.ResourceGroupName `
 	        -ServerName $DatabaseConfiguration.ServerName `
 	        -DatabaseName $DatabaseConfiguration.DatabaseName `
@@ -108,12 +91,13 @@ ForEach ($DatabaseConfiguration in $DatabaseConfigurations) {
 	        -StorageUri $BacpacUri `
 	        -AdministratorLogin $DatabaseConfiguration.UserName `
 	        -AdministratorLoginPassword $DatabaseConfigurationPassword
-
-        $exportStatus = Get-AzureRmSqlDatabaseImportExportStatus -OperationStatusLink $exportRequest.OperationStatusLink
+            
+        $exportStatus = Get-AzureRmSqlDatabaseImportExportStatus -OperationStatusLink $exportRequest.OperationStatusLink        
         $exportStatus
     }
 }
 
+# confirmation
 Write-Output "All Done"
 
 Get-Date
