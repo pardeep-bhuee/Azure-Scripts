@@ -1,0 +1,119 @@
+################
+## Background ##
+################
+
+# This script takes a backup from SQL PaaS and stores it in storage for download
+
+##################
+## Requirements ##
+##################
+
+# 1.1 PaaS SQL server + db's
+# 2.1 storage account + container
+# 3.1 azure automation account (need to make sure "RunAsAccountConnection" is avaiable when creating automation account)
+# 3.2 make sure modules under automation account are updated
+
+
+Get-Date
+
+$ErrorActionPreference = "Stop"
+
+# check connection to account
+$connectionName = "AzureRunAsConnection"
+try
+{
+	# Get the connection "AzureRunAsConnection "
+	$servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
+	
+	# Add account
+	Add-AzureRmAccount `
+		-ServicePrincipal `
+		-TenantId $servicePrincipalConnection.TenantId `
+		-ApplicationId $servicePrincipalConnection.ApplicationId `
+		-CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+
+
+	"Selecting Azure subscription..."
+	Select-AzureRmSubscription -SubscriptionId $servicePrincipalConnection.SubscriptionID -TenantId $servicePrincipalConnection.tenantid 
+}
+catch {
+	if (!$servicePrincipalConnection)
+	{
+		$ErrorMessage = "Connection $connectionName not found."
+		throw $ErrorMessage
+	} else{
+		Write-Error -Message $_.Exception
+		throw $_.Exception
+	}
+}
+
+Write-Output "AzureRunAsConnection: Done."
+
+
+# populate storage details
+$StorageAccountName = '873063twesqlbackups'
+$ContainerName = 'bacpacs'
+$StorageKeytype = 'StorageAccessKey'
+$StorageAccount = Get-AzureRmStorageAccount | ? StorageAccountName -EQ $StorageAccountName
+$StorageAccount
+
+
+# get the storage account keys
+$StorageAccountKeys = Get-AzureRmStorageAccountKey -ResourceGroupName $StorageAccount.ResourceGroupName -Name $StorageAccount.StorageAccountName
+
+# now we only need the first one [0].value
+$StorageAccountKey = $StorageAccountKeys[0].Value 
+# Write-Output $StorageAccountKey
+
+$StorageContext = New-AzureStorageContext -StorageAccountName $storageAccount.StorageAccountName -StorageAccountKey $StorageAccountKey 
+
+Write-Output "Storage: Done."
+
+
+# loop through the databases and obtain backup.
+# the variables blade contains the db details in the following format:
+#
+
+#[
+#    {
+#        "ResourceGroupName":  "Default-SQL-SoutheastAsia",
+#        "ServerName":  "SQL_Server_Name",
+#        "DatabaseName":  "Database_Name",
+#        "Password":  "db_password",
+#        "UserName":  "db_user"
+#    }
+#]
+
+$DatabaseConfigurations = Get-AutomationVariable -Name 'AzureSqlDatabaseExportConfiguration' | ConvertFrom-Json
+
+# See what sql databases are configured for backups
+# Get-AutomationVariable -Name 'AzureSqlDatabaseExportConfiguration'
+# Exit
+
+ForEach ($DatabaseConfiguration in $DatabaseConfigurations) {
+    $DatabaseConfiguration.DatabaseName
+
+    $TheBlobName = (Get-Date -Format 'yyyy-MM-dd-') + $DatabaseConfiguration.DatabaseName + '.bacpac'
+    $TheBlob = Get-AzureStorageBlob -Context $StorageContext -Container $ContainerName | ? Name -eq $TheBlobName 
+    $BacpacUri = "https://$StorageAccountName.blob.core.windows.net/$ContainerName/$TheBlobName"
+
+    If (-Not $TheBlob) {
+        $DatabaseConfigurationPassword = $DatabaseConfiguration.Password | ConvertTo-SecureString -AsPlainText -Force
+        $exportRequest = New-AzureRmSqlDatabaseExport `
+	        -ResourceGroupName $DatabaseConfiguration.ResourceGroupName `
+	        -ServerName $DatabaseConfiguration.ServerName `
+	        -DatabaseName $DatabaseConfiguration.DatabaseName `
+	        -StorageKeytype $StorageKeytype `
+	        -StorageKey $StorageAccountKey `
+	        -StorageUri $BacpacUri `
+	        -AdministratorLogin $DatabaseConfiguration.UserName `
+	        -AdministratorLoginPassword $DatabaseConfigurationPassword
+
+        $exportStatus = Get-AzureRmSqlDatabaseImportExportStatus -OperationStatusLink $exportRequest.OperationStatusLink
+        $exportStatus
+    }
+}
+
+Write-Output "All Done"
+
+Get-Date
